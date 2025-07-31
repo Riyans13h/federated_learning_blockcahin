@@ -64,7 +64,7 @@ class RLRewardAgent:
     def get_rewards(self, norm_shap):
         return [max(0, int(s * self.base * self.q_table[i])) for i, s in enumerate(norm_shap)]
 
-# STEP 7: Blockchain Setup (⚠️ Update your values)
+# STEP 7: Blockchain Setup (Update your values)
 w3 = Web3(Web3.HTTPProvider("https://41d4-2409-4089-ad81-adde-57d1-2311-e844-3daf.ngrok-free.app"))
 with open("/content/Incentive.json") as f:
     abi = json.load(f)['abi']
@@ -77,7 +77,7 @@ agent = RLRewardAgent(n=7)  # ⬅️ 7 clients
 results = []
 
 for r in range(6):  # ⬅️ 6 rounds
-    print(f"\n🔁 Round {r+1}")
+    print(f"\n Round {r+1}")
     local_models, accs = [], []
 
     for i in range(7):  # ⬅️ 7 clients
@@ -89,7 +89,7 @@ for r in range(6):  # ⬅️ 6 rounds
         accs.append(acc)
 
     if r <= 2:  # First 3 rounds: top 80%
-        top_count = int(0.8 * len(accs))  # ⬅️ top 80% of 7 = 5
+        top_count = int(0.8 * len(accs))  #  top 80% of 7 = 5
         top_idx = sorted(range(len(accs)), key=lambda i: accs[i], reverse=True)[:top_count]
         global_model = average_weights([local_models[i] for i in top_idx])
     else:
@@ -101,7 +101,7 @@ for r in range(6):  # ⬅️ 6 rounds
     rewards = agent.get_rewards(norm_shap)
 
     tx_hashes = []
-    for i in range(7):  # ⬅️ 7 clients
+    for i in range(7):  #  7 clients
         reward = max(0, rewards[i])  # Ensure reward is non-negative
         scaled_shap = max(0, int(norm_shap[i]*100))  # Ensure uint-compatible
         tx = contract.functions.submitRoundInfo(r+1, reward, scaled_shap).transact({'from': sender})
@@ -120,7 +120,7 @@ for r in range(6):  # ⬅️ 6 rounds
 # STEP 9: Output Table
 print("\n📊 Final Results Table")
 for r in results:
-    print(f"\n🟢 Round {r['round']}")
+    print(f"\n Round {r['round']}")
     print(f"{'Client':<8}{'Accuracy':<10}{'Shapley':<10}{'Reward':<10}{'TxHash'}")
     for i in range(7):  # ⬅️ 7 clients
         print(f"{i:<8}{r['acc'][i]:.4f}   {r['shap'][i]:.4f}   {r['reward'][i]:<10}{r['hash'][i][:75]}")

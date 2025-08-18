@@ -33,7 +33,7 @@ print(f"Block Number: {tx['blockNumber']}")
 print("\n🔹 Receipt Info")
 print(f"Block Number: {receipt['blockNumber']}")
 print(f"Gas Used: {receipt['gasUsed']}")
-print(f"Status: {'Success ✅' if receipt['status'] == 1 else 'Failed ❌'}")
+print(f"Status: {'Success ' if receipt['status'] == 1 else 'Failed '}")
 print(f"Contract Address: {receipt['contractAddress']}")
 print(f"Logs: {len(receipt['logs'])}")
 
@@ -43,10 +43,10 @@ try:
     decoded_logs = contract.events.submitRoundInfo().process_receipt(receipt)
     if decoded_logs:
         for event in decoded_logs:
-            print(f"📥 Event: {event['event']}")
+            print(f" Event: {event['event']}")
             for arg, val in event['args'].items():
                 print(f"   - {arg}: {val}")
     else:
-        print("⚠️ No matching event logs found.")
+        print(" No matching event logs found.")
 except Exception as e:
-    print("❌ Log decoding failed:", e)
+    print(" Log decoding failed:", e)

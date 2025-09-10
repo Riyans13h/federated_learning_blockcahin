@@ -1,0 +1,14 @@
+# Core libraries
+numpy==1.26.5
+tensorflow==2.14.0
+matplotlib==3.8.0
+
+# Blockchain interaction
+web3==6.2.0
+
+# REST API server (optional, if using Flask)
+Flask==2.3.3
+Flask-RESTful==0.3.9
+
+# Misc
+requests==2.31.0

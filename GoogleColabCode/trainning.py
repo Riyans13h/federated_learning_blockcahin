@@ -1,14 +1,24 @@
-# STEP 1: Install libraries (run once in Colab)
-# !pip install flwr tensorflow web3 matplotlib
+# ============================ [ COLAB SERVER CELL ] ============================
+!pip install flask-ngrok flask tensorflow
 
-# STEP 2: Imports
-import tensorflow as tf
+from flask_ngrok import run_with_ngrok
+from flask import Flask, request, jsonify
 import numpy as np
-from web3 import Web3
-import json, random
-import matplotlib.pyplot as plt
+import tensorflow as tf
+import random
 
-# STEP 3: Model Definition (CNN-style to improve accuracy)
+app = Flask(__name__)
+run_with_ngrok(app)
+
+clients_data = {}
+results = []
+round_number = 0
+global_model = None
+
+(x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+x_test = x_test[..., None] / 255.0
+y_test = y_test
+
 def build_model():
     model = tf.keras.Sequential([
         tf.keras.layers.InputLayer(input_shape=(28, 28, 1)),
@@ -23,35 +33,25 @@ def build_model():
     model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
     return model
 
-# STEP 4: Load & Prepare Data (use 7 clients, enough data per client)
-(x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
-x_train, x_test = x_train[..., None]/255.0, x_test[..., None]/255.0
-clients = [(x_train[i*1000:(i+1)*1000], y_train[i*1000:(i+1)*1000]) for i in range(7)]  # ⬅️ 7 clients
-
-# STEP 5: Averaging + Evaluation + Monte Carlo Shapley
 def average_weights(models):
-    base = build_model()
-    weights = [m.get_weights() for m in models]
-    avg = [np.mean([w[i] for w in weights], axis=0) for i in range(len(weights[0]))]
-    base.set_weights(avg)
-    return base
+    return [np.mean([w[i] for w in models], axis=0) for i in range(len(models[0]))]
 
-def evaluate_model(model):
-    return model.evaluate(x_test, y_test, verbose=0)[1]
+def evaluate_model(model, x, y):
+    return model.evaluate(x, y, verbose=0)[1]
 
-def monte_carlo_shapley(models, rounds=10):
+def monte_carlo_shapley(models, rounds=5):
     n, shapley = len(models), [0.0]*len(models)
     for _ in range(rounds):
         perm, acc, temp = random.sample(range(n), n), 0, []
         for idx in perm:
             temp.append(models[idx])
-            model = average_weights(temp)
-            new_acc = evaluate_model(model)
+            m = build_model()
+            m.set_weights(average_weights(temp))
+            new_acc = evaluate_model(m, x_test, y_test)
             shapley[idx] += new_acc - acc
             acc = new_acc
     return [s/rounds for s in shapley]
 
-# STEP 6: RL Agent
 class RLRewardAgent:
     def __init__(self, n, base_reward=1000):
         self.q_table = [1.0]*n
@@ -64,76 +64,138 @@ class RLRewardAgent:
     def get_rewards(self, norm_shap):
         return [max(0, int(s * self.base * self.q_table[i])) for i, s in enumerate(norm_shap)]
 
-# STEP 7: Blockchain Setup (Update your values)
-w3 = Web3(Web3.HTTPProvider("https://41d4-2409-4089-ad81-adde-57d1-2311-e844-3daf.ngrok-free.app"))
-with open("/content/Incentive.json") as f:
-    abi = json.load(f)['abi']
-contract = w3.eth.contract(address='0xB418D99ecF07bb3DfA6a2C8DBAB213c5Aa7FC95D', abi=abi)
-sender = w3.eth.accounts[0]
+agent = RLRewardAgent(n=7)
 
-# STEP 8: Federated Rounds
-global_model = build_model()
-agent = RLRewardAgent(n=7)  # ⬅️ 7 clients
-results = []
+@app.route("/")
+def home():
+    return "✅ Federated Server is Running with REST API!"
 
-for r in range(6):  # ⬅️ 6 rounds
-    print(f"\n Round {r+1}")
-    local_models, accs = [], []
+@app.route("/upload_model", methods=["POST"])
+def upload_model():
+    data = request.get_json()
+    cid = int(data["client_id"])
+    weights = [np.array(w) for w in data["weights"]]
+    clients_data[cid] = weights
+    print(f"📥 Client {cid} model received ({len(clients_data)}/7)")
+    return jsonify({"status": "Model received", "client_id": cid})
 
-    for i in range(7):  # ⬅️ 7 clients
-        model = build_model()
-        model.set_weights(global_model.get_weights())
-        model.fit(clients[i][0], clients[i][1], epochs=3, batch_size=64, verbose=0)
-        acc = evaluate_model(model)
-        local_models.append(model)
-        accs.append(acc)
+@app.route("/aggregate", methods=["POST"])
+def aggregate():
+    global clients_data, global_model, round_number, results
 
-    if r <= 2:  # First 3 rounds: top 80%
-        top_count = int(0.8 * len(accs))  #  top 80% of 7 = 5
-        top_idx = sorted(range(len(accs)), key=lambda i: accs[i], reverse=True)[:top_count]
-        global_model = average_weights([local_models[i] for i in top_idx])
-    else:
-        global_model = average_weights(local_models)
+    if len(clients_data) < 7:
+        return jsonify({"error": "Need 7 clients to aggregate"}), 400
 
-    shap = monte_carlo_shapley(local_models, rounds=3)
-    total = sum(shap)
-    norm_shap = [s / total if total > 0 else 0 for s in shap]
+    local_models = [clients_data[i] for i in sorted(clients_data)]
+    client_ids = sorted(clients_data)
+    shap = monte_carlo_shapley(local_models, rounds=5)
+    mean_shap, std_shap = np.mean(shap), np.std(shap)
+    anomalies = [client_ids[i] for i, s in enumerate(shap) if s < mean_shap - 2*std_shap]
+
+    filtered_models = [local_models[i] for i in range(7) if client_ids[i] not in anomalies]
+    filtered_shap = [shap[i] for i in range(7) if client_ids[i] not in anomalies]
+
+    selected = filtered_models
+    if round_number <= 2:
+        top_k = int(0.8 * len(filtered_models))
+        top_idx = sorted(range(len(filtered_shap)), key=lambda i: filtered_shap[i], reverse=True)[:top_k]
+        selected = [filtered_models[i] for i in top_idx]
+
+    avg_weights = average_weights(selected)
+    if global_model is None:
+        global_model = build_model()
+    global_model.set_weights(avg_weights)
+
+    total = sum(filtered_shap)
+    norm_shap = [s / total if total > 0 else 0 for s in filtered_shap]
     rewards = agent.get_rewards(norm_shap)
+    for i in range(len(rewards)):
+        agent.update(i, rewards[i], filtered_shap[i])
 
-    tx_hashes = []
-    for i in range(7):  #  7 clients
-        reward = max(0, rewards[i])  # Ensure reward is non-negative
-        scaled_shap = max(0, int(norm_shap[i]*100))  # Ensure uint-compatible
-        tx = contract.functions.submitRoundInfo(r+1, reward, scaled_shap).transact({'from': sender})
-        receipt = w3.eth.wait_for_transaction_receipt(tx)
-        tx_hashes.append(receipt.transactionHash.hex())
-        agent.update(i, reward, accs[i])
-
+    round_number += 1
     results.append({
-        "round": r+1,
-        "acc": accs,
-        "shap": norm_shap,
-        "reward": rewards,
-        "hash": tx_hashes
+        "round": round_number,
+        "shap": shap,
+        "rewards": rewards,
+        "anomalies": anomalies
     })
 
-# STEP 9: Output Table
-print("\n📊 Final Results Table")
-for r in results:
-    print(f"\n Round {r['round']}")
-    print(f"{'Client':<8}{'Accuracy':<10}{'Shapley':<10}{'Reward':<10}{'TxHash'}")
-    for i in range(7):  # ⬅️ 7 clients
-        print(f"{i:<8}{r['acc'][i]:.4f}   {r['shap'][i]:.4f}   {r['reward'][i]:<10}{r['hash'][i][:75]}")
+    clients_data = {}
+    return jsonify({
+        "status": "aggregated",
+        "round": round_number,
+        "shapley": shap,
+        "anomalies": anomalies,
+        "rewards": rewards
+    })
 
-# STEP 10: Plot Results
-rounds = [r['round'] for r in results]
-for label in ['acc', 'shap', 'reward']:
-    plt.figure(figsize=(8, 4))
-    for i in range(7):  # ⬅️ 7 clients
-        plt.plot(rounds, [r[label][i] for r in results], label=f'Client {i}')
-    plt.title(f"{label.capitalize()} over Rounds")
-    plt.xlabel("Round")
-    plt.ylabel(label.capitalize())
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+@app.route("/results", methods=["GET"])
+def get_results():
+    return jsonify(results)
+
+app.run()
+
+
+
+
+
+
+
+
+###########################################################################################################################################################################
+
+
+import requests
+import tensorflow as tf
+import numpy as np
+
+# Replace with your actual ngrok URL from the server output
+server_url = "http://<your-ngrok-url>.ngrok.io"
+
+client_id = int(input("Enter Client ID (0-6): "))
+is_poisoned = client_id == 6
+
+(x_train, y_train), _ = tf.keras.datasets.mnist.load_data()
+x_train = x_train[..., None] / 255.0
+
+x_local = x_train[client_id*1000:(client_id+1)*1000]
+y_local = y_train[client_id*1000:(client_id+1)*1000]
+
+if is_poisoned:
+    print(f"[⚠️] Client {client_id} is poisoned (label flipping)")
+    y_local = (y_local + 5) % 10
+
+def build_model():
+    model = tf.keras.Sequential([
+        tf.keras.layers.InputLayer(input_shape=(28, 28, 1)),
+        tf.keras.layers.Conv2D(32, (3,3), activation='relu'),
+        tf.keras.layers.MaxPooling2D(),
+        tf.keras.layers.Conv2D(64, (3,3), activation='relu'),
+        tf.keras.layers.MaxPooling2D(),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dense(10, activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+model = build_model()
+model.fit(x_local, y_local, epochs=3, batch_size=64, verbose=0)
+weights = model.get_weights()
+
+payload = {
+    "client_id": str(client_id),
+    "weights": [w.tolist() for w in weights]
+}
+
+res = requests.post(f"{server_url}/upload_model", json=payload)
+print(res.json())
+
+# Only client 0 triggers aggregation
+if client_id == 0:
+    agg = requests.post(f"{server_url}/aggregate")
+    print("🔁 Aggregation Result:", agg.json())
+
+res = requests.get(f"{server_url}/results")
+print("📊 All Rounds Summary:")
+print(res.json())
